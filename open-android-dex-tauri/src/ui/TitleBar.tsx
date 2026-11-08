@@ -2,9 +2,17 @@ import type { ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { IS_MAC, TITLEBAR_LEAD } from "../lib/host";
 import { Icon } from "./Icon";
-import { Segmented } from "./kit";
 
-export type Tab = "desktop" | "apps" | "linux";
+/**
+ * One section, one window: connect, then the desktop.
+ *
+ * The Apps and Linux tabs are gone by request — this is a desktop app, and a
+ * second way to open single apps in their own window (with its own tab, its own
+ * pinning, its own panel) was a second product bolted to the first. Everything
+ * they could do has a home on the desktop itself: the app drawer opens any app
+ * in a window, and Linux is one of the drawer's own tools.
+ */
+export type Tab = "desktop";
 
 /**
  * The window's top strip: the app's name, the switch between the things it
@@ -17,14 +25,10 @@ export type Tab = "desktop" | "apps" | "linux";
  * buttons still short-circuit the walk, so everything in it stays clickable.
  */
 export function TitleBar({
-  tab,
-  onTab,
   menu,
   notifications,
   desktopBusy,
 }: {
-  tab: Tab;
-  onTab: (t: Tab) => void;
   menu: ReactNode;
   /** The phone's notifications' bell, beside the help menu: on every tab, since they are. */
   notifications?: ReactNode;
@@ -38,17 +42,14 @@ export function TitleBar({
         <img src="/logo.svg" alt="" width={16} height={16} className="shrink-0" draggable={false} />
         <span className="titlebar-name truncate">Open Android DeX</span>
       </div>
-      <Segmented
-        label="Sections"
-        className="segmented-nav"
-        value={tab}
-        onChange={onTab}
-        options={[
-          { value: "desktop", label: "Desktop", icon: "laptop", busy: desktopBusy && tab !== "desktop" },
-          { value: "apps", label: "Apps", icon: "apps" },
-          { value: "linux", label: "Linux", icon: "terminal" },
-        ]}
-      />
+      {/* The section switch used to live here. With one section it would be a
+          control that can only ever say "you are here". */}
+      {desktopBusy && (
+        <div className="segmented-nav flex items-center gap-2 px-3 text-[12px] text-[var(--ink-3)]">
+          <span className="dot-pulse" />
+          Opening the desktop…
+        </div>
+      )}
       <div className={`flex flex-1 items-center justify-end gap-1 ${IS_MAC ? "pr-2.5" : ""}`}>
         {notifications}
         {menu}

@@ -1,5 +1,33 @@
 <div align="center">
 
+# Dex-X
+
+### A desktop for your Android phone, on your Windows PC
+
+**This is Dex-X, a modified build of
+[Open Android DeX](https://github.com/dotnetdreamer/open-android-dex).**
+It is GPL-3.0, like the project it comes from — see `NOTICE.md` and `LICENSE`.
+
+Your phone on the cable, a real desktop on your monitor, and your phone's own
+screen left alone: its apps, its notifications, its home screen, exactly as it
+was. The desktop lives on its own virtual display, so nothing you do on the PC
+takes the phone away from you.
+
+Downloads are built by GitHub Actions on every push: open the **Actions** tab →
+*Dex-X — APK + Windows EXE* → the newest green run → *Artifacts*.
+
+| File | What it is |
+| --- | --- |
+| `Dex-X-windows-x64-portable.zip` | The PC app, unzip anywhere and run. The launcher APK is already inside it |
+| `Dex-X-windows-x64-setup.exe` | The same, as an installer |
+| `Dex-X-launcher-apk` | The phone half on its own, for a phone that never meets the PC |
+
+</div>
+
+---
+
+<div align="center">
+
 <img src="doc/img/logo.png" width="112" height="112" alt="Open Android DeX">
 
 # Open Android DeX

@@ -523,6 +523,13 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
             // a minimised window is not visible, so it would otherwise vanish from the
             // taskbar the moment it is minimised — indistinguishable from being closed.
             next.addAll(minimisedPkgs);
+            // …and so is a window the PC could not SEE at this instant: mid-transition,
+            // mid-maximise, or between two of its polls. The service is the authority on
+            // what is still open on the display (it is already polling the task list for
+            // the captions), so a package it still holds stays on the taskbar even when
+            // this broadcast has lost it. Without this the strip drops a tile for good
+            // and the only way back is to relaunch the app.
+            next.addAll(CaptionService.openPkgs());
             // keep icon order stable: surviving entries keep their slot,
             // newly opened apps append on the right
             LinkedHashSet<String> merged = new LinkedHashSet<>();
@@ -6135,6 +6142,23 @@ public class LauncherActivity extends Activity implements WidgetLaunch.Desktop {
         // another app under the same name.
         if (LINUX_PKG.equals(component.getPackageName())) return null;
         return findByPackage(component.getPackageName());
+    }
+
+    /**
+     * Bare wallpaper tapped.
+     *
+     * Android raises a task when anything inside it is touched, so the tap that
+     * reached the background had already brought the desktop in front of the
+     * app windows — which reads as "the window disappeared". Put it back behind
+     * them before anything is drawn on top of it.
+     *
+     * On the phone this is skipped: there is no desktop session there, and the
+     * phone's own home behaviour is the phone's business.
+     */
+    void onDesktopTapped() {
+        if (onPhone()) return;
+        if (CaptionService.desktopDisplay() < 0) return;
+        CaptionService.sendDesktopToBack(getTaskId());
     }
 
     /** Drop an app we just closed ourselves — no need to wait for the poll. */

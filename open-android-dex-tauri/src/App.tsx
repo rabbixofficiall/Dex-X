@@ -6,13 +6,11 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error as logError, info as logInfo, warn as logWarn } from "@tauri-apps/plugin-log";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AppsPanel, opensAppsOnConnect } from "./features/apps/AppsPanel";
 import { ClosePrompt } from "./features/close/ClosePrompt";
 import { DesktopPage, type Method } from "./features/desktop/DesktopPage";
 import { deviceName, type AdbState, type LaunchMode, type Phase, type Progress } from "./features/desktop/model";
 import { useSessions } from "./features/mirror/useSessions";
 import { NotificationsBell } from "./features/notifications/NotificationsBell";
-import { RemotePanel } from "./features/remote/RemotePanel";
 import { WirelessPanel } from "./features/wireless/WirelessPanel";
 import { ContextMenu, type ContextAction } from "./ui/ContextMenu";
 import { Icon } from "./ui/Icon";
@@ -104,7 +102,8 @@ export default function App() {
   /** The launcher's install is held up by a question on the phone (Play Protect). */
   const [askedOnPhone, setAskedOnPhone] = useState(false);
   const { toast, say, dismiss } = useToast();
-  const [tab, setTab] = useState<Tab>("desktop");
+  /** One section, so this is a constant — see TitleBar's Tab. */
+  const tab: Tab = "desktop";
   /** Cable or Wi-Fi, on the connect screen. Wi-Fi first for someone who has used it before. */
   const [method, setMethod] = useState<Method>("usb");
   const [version, setVersion] = useState("");
@@ -227,7 +226,6 @@ export default function App() {
         if (startup) {
           logInfo(`boot: started for ${startup.pkg} on ${startup.serial} — its window, no desktop`);
           armedRef.current = false;
-          setTab("apps");
         }
       })
       .catch(() => {})
@@ -378,14 +376,7 @@ export default function App() {
     const ready =
       devices.find((d) => d.state === "device" && d.serial === preferredSerial.current) ??
       devices.find((d) => d.state === "device");
-    if (ready && armedRef.current && opensAppsOnConnect()) {
-      // Its owner asked for the phone's apps here rather than its desktop:
-      // the Apps page, and no desktop is set up on the phone at all.
-      armedRef.current = false;
-      logInfo(`launch: ${deviceName(ready)} opens its apps here, not a desktop`);
-      setPhase({ kind: "connect" });
-      setTab("apps");
-    } else if (ready && armedRef.current) {
+    if (ready && armedRef.current) {
       launch(ready);
     } else if (current.kind === "boot" && scannedOnce.current && reconnectDone && !ready) {
       setPhase({ kind: "connect" });
@@ -434,8 +425,13 @@ export default function App() {
         logInfo("launch: desktop ready");
         setProgress((p) => ({ ...p, step: 3, waiting: false }));
         setPhase({ kind: "ready", device });
-        // the scrcpy desktop window is the star — tuck this one away
-        setTimeout(() => appWindow.minimize().catch(() => {}), 1400);
+        // The desktop window is the star: this one goes AWAY entirely, not to the
+        // taskbar. Minimised it still showed a button next to the desktop, which
+        // reads as two halves of one app that failed to close — the "double
+        // window" report. Hidden, there is exactly one window on screen until
+        // the session ends (this one comes back with the connect screen) or the
+        // user starts the app again, which single-instance turns into a show.
+        setTimeout(() => appWindow.hide().catch(() => {}), 1400);
       })
       .catch((e) => {
         // The phone dropping off adb part way through is not a failed launch.
@@ -529,7 +525,7 @@ export default function App() {
       // it, which is why the restore that the ordinary path runs is skipped.
       if (switchingToWireless.current) {
         switchingToWireless.current = false;
-        appWindow.unminimize().catch(() => {});
+        appWindow.show().catch(() => {});
         invoke<WirelessResult>("wireless_go_wireless", { serial: phase.device.serial })
           .then(async (result) => {
             logInfo(`wireless: ${phase.device.serial} is now reachable at ${result.address}`);
@@ -564,7 +560,7 @@ export default function App() {
       invoke("adb_end_desktop", { serial: phase.device.serial })
         .then(() => logInfo("exit: the phone is back to normal"))
         .catch((e) => logWarn(`exit: the phone could not be fully restored — ${String(e)}`));
-      appWindow.unminimize().catch(() => {});
+      appWindow.show().catch(() => {});
       appWindow.setFocus().catch(() => {});
     }
   }, [phase, sessions, launch, failLaunch, say]);
@@ -710,13 +706,7 @@ export default function App() {
   // sight. Reachable now, or none. A drop on one of its apps' windows goes to
   // that app instead (apps/drops.rs).
   const shownPhone =
-    tab === "desktop"
-      ? "device" in phase
-        ? phase.device
-        : readyDevice
-      : tab === "apps"
-        ? readyDevice
-        : devices.find((d) => d.state === "device");
+    "device" in phase ? phase.device : readyDevice ?? devices.find((d) => d.state === "device");
   const dropPhone = devices.find((d) => d.state === "device" && d.serial === shownPhone?.serial);
   const dropPhoneRef = useRef(dropPhone);
   dropPhoneRef.current = dropPhone;
@@ -849,16 +839,13 @@ export default function App() {
   return (
     <div className="app-backdrop flex h-screen flex-col">
       <TitleBar
-        tab={tab}
-        onTab={setTab}
         menu={helpMenu}
         notifications={<NotificationsBell />}
         desktopBusy={phase.kind === "launching" || switching}
       />
       <main className="relative min-h-0 flex-1 overflow-y-auto">
         <div key={tab} className="fade-in min-h-full">
-          {tab === "desktop" ? (
-            <DesktopPage
+          <DesktopPage
               phase={phase}
               adb={adb}
               reconnecting={reconnecting}
@@ -885,11 +872,6 @@ export default function App() {
                 chooseAnother: () => setPhase({ kind: "connect" }),
               }}
             />
-          ) : tab === "apps" ? (
-            <AppsPanel device={readyDevice} say={say} />
-          ) : (
-            <RemotePanel devices={devices} />
-          )}
         </div>
       </main>
       <ContextMenu actions={contextActions} />

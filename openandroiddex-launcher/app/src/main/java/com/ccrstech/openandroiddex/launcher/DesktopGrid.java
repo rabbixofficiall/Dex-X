@@ -182,6 +182,14 @@ class DesktopGrid extends ViewGroup {
             showDesktopMenu();
             return true;
         });
+        // A tap on bare wallpaper. The tiles and widgets are children and take
+        // their own taps, so anything that arrives here was aimed at the
+        // background — and the background must not end up in front of the
+        // windows standing on it. See LauncherActivity#onDesktopTapped.
+        setOnClickListener(v -> {
+            if (dragItem != null || dragWidget != null || resizeItem != null) return;
+            host.onDesktopTapped();
+        });
     }
 
     // ── geometry ──

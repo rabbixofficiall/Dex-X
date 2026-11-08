@@ -118,6 +118,53 @@ public final class CaptionService extends AccessibilityService {
         if (t != null && !s.minimised.containsKey(taskId)) s.onMinimise(t);
     }
 
+    /**
+     * Packages with a window on the desktop display right now — visible or not.
+     *
+     * The taskbar's open-apps row used to be fed only by the computer's
+     * broadcast, and that one is built from VISIBILITY: a window in the middle
+     * of a transition, hidden by us, or briefly not visibleRequested drops out
+     * of it for a tick. The launcher merged the broadcast by "keep what is in
+     * it", so one missed tick was enough to remove an app's tile for good —
+     * the app stayed open with no way back from the taskbar. ("nicher recent
+     * app hide hoye jai".)
+     *
+     * This service already polls the display's task list several times a second
+     * for the captions, so it is the authoritative answer to "is it still
+     * open", and it is in-process — no broadcast, no race.
+     */
+    static java.util.Set<String> openPkgs() {
+        CaptionService s = live;
+        if (s == null) return java.util.Collections.emptySet();
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        // `tasks` is the display's live task list, refreshed by the reconcile pass.
+        for (WmClient.Task t : s.tasks.values()) {
+            if (t.pkg != null && !t.pkg.isEmpty()) out.add(t.pkg);
+        }
+        return out;
+    }
+
+    /**
+     * Put the desktop itself behind the windows on it.
+     *
+     * Called when the wallpaper is tapped. The launcher is an ordinary task on
+     * this display, so Android raises it to the front the moment anything on it
+     * is touched — and a full-screen task in front of the freeform windows
+     * covers every one of them. That is the "blank space a click korle window
+     * hide hoye jai" report: the window has not gone anywhere, the desktop has
+     * climbed on top of it.
+     *
+     * A desktop is the back of the picture. Tapping it may focus it, but it may
+     * not become the front-most window, so this puts it back where it belongs
+     * in the same gesture that raised it.
+     */
+    static void sendDesktopToBack(int taskId) {
+        CaptionService s = live;
+        if (s == null || s.wm == null || s.desktopDisplayId < 0) return;
+        final int display = s.desktopDisplayId;
+        s.wm.post(() -> s.wm.sendToBack(display, taskId));
+    }
+
     /** Is this task minimised — hidden by us, still open? */
     static boolean minimisedTask(int taskId) {
         CaptionService s = live;
@@ -657,6 +704,71 @@ public final class CaptionService extends AccessibilityService {
                 && !LinuxWindowActivity.class.getName().equals(t.activity);
     }
 
+    /**
+     * Packages seen on the desktop display during this session.
+     *
+     * Their tasks are the ones that can be left in FREEFORM after being opened on
+     * the phone: they were launched with {@code --windowingMode 5} here, and
+     * Android carries the same task over when it moves to the default display —
+     * so the app opens on the phone as a small freeform window wearing a title
+     * bar instead of filling the screen. ("pc te kono app use korle phone a oi
+     * app a gele screen choto abnormal dekhai.")
+     *
+     * Only these are ever touched on the phone's display — never an app the user
+     * opened there themselves, and never a task the desktop never launched.
+     */
+    private final Set<String> desktopPkgs = new HashSet<>();
+
+    /** Reconcile ticks between phone-display sweeps (the poll runs every 60-400 ms). */
+    private int phoneSweep = 0;
+
+    /**
+     * Give the phone's screen back to an app the desktop left in freeform.
+     *
+     * A task launched onto the desktop display keeps its windowing mode when
+     * Android moves it to the default display, so the app comes up on the phone
+     * as a small floating window — with our caption strip's app-bounds inset
+     * still applied, which is what makes it look not merely small but wrong.
+     * Resizing it to the display and dropping the inset is the whole fix; the
+     * windowing mode itself is not ours to change (that needs
+     * {@code ActivityTaskManager}, and the daemon's task is the desktop's).
+     *
+     * Runs on the reconcile poll, so a window moved to the phone is put right
+     * within a couple of seconds of it landing there.
+     */
+    private void releaseFreeformOnPhone() {
+        if (wm == null || desktopPkgs.isEmpty()) return;
+        List<WmClient.Task> phone;
+        try {
+            phone = wm.list(Display.DEFAULT_DISPLAY);
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (phone == null || phone.isEmpty()) return;
+        android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+        try {
+            Display d = getSystemService(android.hardware.display.DisplayManager.class)
+                    .getDisplay(Display.DEFAULT_DISPLAY);
+            if (d == null) return;
+            d.getRealMetrics(dm);
+        } catch (Throwable t) {
+            return;
+        }
+        for (WmClient.Task t : phone) {
+            if (!t.isFreeform() || t.pkg == null || !desktopPkgs.contains(t.pkg)) continue;
+            // Already the whole screen: nothing to do, and resizing again would
+            // only cost a relayout.
+            if (t.right - t.left >= dm.widthPixels - 1 && t.bottom - t.top >= dm.heightPixels - 1
+                    && t.left <= 1 && t.top <= 1) {
+                continue;
+            }
+            trace("phone: releasing " + t.pkg + " from freeform " + t.left + "," + t.top
+                    + "," + t.right + "," + t.bottom);
+            wm.unstrip(Display.DEFAULT_DISPLAY, t.taskId);
+            wm.bounds(Display.DEFAULT_DISPLAY, t.taskId, 0, 0, dm.widthPixels, dm.heightPixels);
+        }
+    }
+
     /** @return true if any caption geometry changed, i.e. windows are on the move. */
     private boolean applyTasks(int display, List<WmClient.Task> live) {
         trackDensity(display);
@@ -675,6 +787,16 @@ public final class CaptionService extends AccessibilityService {
         // the one caller that has to put windows back in the order it found
         // them.
         lastStack = stack;
+        for (WmClient.Task t : stack) {
+            if (t.pkg != null) desktopPkgs.add(t.pkg);
+        }
+        // Every ~2 s: an app that was launched here and is now open on the PHONE
+        // has to be given the phone's screen back. Cheap (one LIST on another
+        // display, ~2.5 ms) and done on this poll rather than its own thread.
+        if (++phoneSweep >= 8) {
+            phoneSweep = 0;
+            releaseFreeformOnPhone();
+        }
 
         // A minimised task stops being minimised when it comes back, and stops existing
         // when it is really closed. Either way the taskbar should stop pinning it.
@@ -1191,17 +1313,101 @@ public final class CaptionService extends AccessibilityService {
         // and the add would hang with an allocated widget id nobody can reach. ✕ stays,
         // because ours is a real close (wmd removeTask, not One UI's hide), which the detour
         // turns into a clean cancel.
-        if (!WidgetDetourActivity.isDetourTask(task.taskId)) {
-            bar.addView(button(ui, "◧", false, v -> onSnapLeft(task)), buttonParams(height));
-            bar.addView(button(ui, "◨", false, v -> onSnapRight(task)), buttonParams(height));
+        final boolean detour = WidgetDetourActivity.isDetourTask(task.taskId);
+        final int btnPx = buttonWidth();
+        // A Horizontal LinearLayout clips from its RIGHT end when it runs out of
+        // room, and the title next to it has weight 1 — so a narrow window used
+        // to eat the buttons right to left and end up wearing a ✕ and nothing
+        // else. That is exactly how a window comes to have "no minimise
+        // option". Decide from the surface's own width instead: the close, the
+        // minimise, the maximise and the resize grip are fixed costs, and the
+        // two snap buttons are given up first when there is no room for them.
+        final int budget = width - px(10) - 2 * px(CaptionChrome.bandDp());
+        final boolean roomForSnaps = !detour && budget >= btnPx * 6 + px(70);
+        if (!detour) {
+            if (roomForSnaps) {
+                bar.addView(button(ui, "◧", false, v -> onSnapLeft(task)), buttonParams(height));
+                bar.addView(button(ui, "◨", false, v -> onSnapRight(task)), buttonParams(height));
+            }
             bar.addView(button(ui, "—", false, v -> onMinimise(task)), buttonParams(height));
             bar.addView(button(ui, "▢", false, v -> onMaximise(task)), buttonParams(height));
         }
+        // Resize, where the hand already is: a grip in the title bar that pulls
+        // the bottom-right corner. The window's own bottom-right corner is not
+        // reachable — our surface is the strip — so the corner comes to the
+        // pointer instead. See CaptionChrome for the two edge bands as well.
+        if (!detour) {
+            bar.addView(CaptionChrome.grip(ui, resizerFor(task), "⤡", px(13), theme.textDim, btnPx),
+                    buttonParams(height));
+        }
         bar.addView(button(ui, "✕", true, v -> onClose(task)), buttonParams(height));
-        bar.setOnTouchListener(dragHandler(c, task));
+        bar.setOnTouchListener(dragHandler(c, task, bar));
 
-        setView(c.host, bar, width, height);
+        // The bar never quite reaches the window's edges: the resize bands live
+        // in that margin, and a button sitting under one would answer the resize
+        // instead of its own click.
+        CaptionChrome chrome = new CaptionChrome(ui, resizerFor(task));
+        chrome.setBar(bar, px(CaptionChrome.bandDp()));
+
+        setView(c.host, chrome, width, height);
         return c;
+    }
+
+    /** The width of every caption button, in the desktop display's px. */
+    private int buttonWidth() {
+        return px(DexTheme.of(this).win11 ? 46 : 38);
+    }
+
+    /**
+     * What a resize gesture needs to know about one task, handed to
+     * {@link CaptionChrome}.
+     *
+     * The rect is read from {@link #tasks} on every call rather than captured:
+     * the listener outlives the rect it was built with, and a capture would
+     * resize the window from wherever it was when the bar was first attached.
+     */
+    private CaptionChrome.Resizer resizerFor(WmClient.Task task) {
+        final int id = task.taskId;
+        final int display = task.displayId;
+        return new CaptionChrome.Resizer() {
+            @Override
+            public int[] rect() {
+                WmClient.Task t = tasks.get(id);
+                return t == null ? null : new int[]{t.left, t.top, t.right, t.bottom};
+            }
+
+            @Override
+            public int[] limits() {
+                return maxRect(display);
+            }
+
+            @Override
+            public void apply(int left, int top, int right, int bottom) {
+                final int strip = captionHeight(id);
+                maximized.remove(id);
+                // The new rect is this window's restore target from now on: a
+                // hand resize is the user saying where it belongs.
+                restoreBounds.put(id, new int[]{left, top, right, bottom});
+                WmClient.Task t = tasks.get(id);
+                if (t != null) {
+                    t.left = left;
+                    t.top = top;
+                    t.right = right;
+                    t.bottom = bottom;
+                }
+                wm.post(() -> wm.resize(display, id, left, top, right, bottom, strip));
+            }
+
+            @Override
+            public void onResizedByHand() {
+                maximized.remove(id);
+            }
+
+            @Override
+            public int px(int dp) {
+                return CaptionService.this.px(dp);
+            }
+        };
     }
 
     /**
@@ -1400,8 +1606,8 @@ public final class CaptionService extends AccessibilityService {
 
     private LinearLayout.LayoutParams buttonParams(int height) {
         // 46px under the Windows 11 shell, which is the width its own caption
-        // buttons are; ours is narrower because the DeX strip carries five.
-        return new LinearLayout.LayoutParams(px(DexTheme.of(this).win11 ? 46 : 38), height);
+        // buttons are; ours is narrower because the DeX strip carries more.
+        return new LinearLayout.LayoutParams(buttonWidth(), height);
     }
 
     /**
@@ -1459,7 +1665,49 @@ public final class CaptionService extends AccessibilityService {
      * Latest-wins coalescing, never drop: the final frame of a gesture carries the final
      * position, so discarding it would leave the window short of where it was released.
      */
+    /**
+     * Is this display point inside one of the bar's clickable children?
+     *
+     * Asked in DISPLAY coordinates off the view's own placement, because the bar
+     * is not necessarily laid out where the service thinks it is: the host owns
+     * the surface's position, and a stale {@code task.left} is exactly the case
+     * this has to survive.
+     */
+    private static boolean overButton(View bar, int rawX, int rawY) {
+        if (!(bar instanceof android.view.ViewGroup)) return false;
+        android.view.ViewGroup group = (android.view.ViewGroup) bar;
+        int[] loc = new int[2];
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (!child.isClickable() || child.getVisibility() != View.VISIBLE) continue;
+            child.getLocationOnScreen(loc);
+            if (rawX >= loc[0] && rawX < loc[0] + child.getWidth()
+                    && rawY >= loc[1] && rawY < loc[1] + child.getHeight()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private View.OnTouchListener dragHandler(Caption caption, WmClient.Task task) {
+        return dragHandler(caption, task, null);
+    }
+
+    /**
+     * The same handler, told which bar it belongs to so it can stand down over
+     * the buttons.
+     *
+     * A ViewGroup gives its children the touch first, so this only ever runs for
+     * a press the buttons did not take — but the surface here is reparented into
+     * ANOTHER app's window, and on that path hit-testing has been observed to
+     * miss: the press reaches the bar, the bar starts a drag, and the ✕ or the
+     * ▢ that was pressed never fires. That is the "one click does nothing, the
+     * second one works" report, and the black frame between them is the app
+     * relaying out for a window that was dragged by a pixel instead of
+     * maximised. So: if the press lands on a child that is clickable, this
+     * returns false immediately and the tap goes where it was aimed.
+     */
+    private View.OnTouchListener dragHandler(Caption caption, WmClient.Task task, View bar) {
         return new View.OnTouchListener() {
             private int grabDx, grabDy;
             private boolean dragging;
@@ -1475,6 +1723,7 @@ public final class CaptionService extends AccessibilityService {
                 int rawY = (int) e.getRawY();
                 switch (e.getActionMasked()) {
                     case android.view.MotionEvent.ACTION_DOWN:
+                        if (overButton(bar, rawX, rawY)) return false;
                         // Double-click the bar to maximise/restore, as on Windows. Only the
                         // empty space gets here: the buttons are child views and consume
                         // their own taps, so this cannot fire from ✕ or ▢. The title is a
@@ -1514,6 +1763,13 @@ public final class CaptionService extends AccessibilityService {
                             send(rawX - grabDx, rawY - grabDy);   // replay the last point
                             dragging = false;
                             lastTap = 0;   // a drag is not half of a double-click
+                            // Drag to an edge and let go: fill that half, as Windows
+                            // and every tiling desktop do. It is the gesture people
+                            // already make, and without it the only way to place two
+                            // windows side by side is two trips to the title bar.
+                            if (e.getActionMasked() == android.view.MotionEvent.ACTION_UP) {
+                                snapIfDraggedToEdge(task, rawX - grabDx, rawY - grabDy);
+                            }
                             return true;
                         }
                         // Remember it as the first half of a possible double-click. Doing
@@ -1547,6 +1803,32 @@ public final class CaptionService extends AccessibilityService {
                 task.top = y;
             }
         };
+    }
+
+    /**
+     * A window released near the left or right edge fills that half.
+     *
+     * Deliberately generous about where the window's TOP-LEFT ended up rather
+     * than where the pointer is: the title bar is dragged by its own grip point,
+     * so the pointer can be a hundred pixels shy of the edge while the window is
+     * already flush against it. Only the horizontal position decides, and only
+     * for a window that is not already filling the display — a maximised window
+     * dropped at the edge should not become a half.
+     */
+    private void snapIfDraggedToEdge(WmClient.Task task, int winX, int winY) {
+        final int id = task.taskId;
+        final int display = task.displayId;
+        android.graphics.Point size = displaySize(display);
+        if (size.x <= 0) return;
+        int edge = px(24);
+        // Above this the window is not being "moved to an edge", it is being
+        // dropped somewhere near one.
+        if (winY < 0 || winY > size.y - taskbarPx(display)) return;
+        boolean left = winX <= edge;
+        boolean right = winX + (task.right - task.left) >= size.x - edge;
+        if (!left && !right) return;
+        if (near(tasks.containsKey(id) ? tasks.get(id) : task, maxRect(display))) return;
+        snap(task, left);
     }
 
     /** Movement under this is a click on the bar, not the start of a drag. */
