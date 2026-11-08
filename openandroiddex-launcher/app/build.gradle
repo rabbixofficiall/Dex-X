@@ -35,8 +35,14 @@ android {
         // those two features out of sight on a 32-bit install. A 64-bit phone
         // still installs as arm64-v8a. x86 (32-bit) stays out: no phone worth
         // the ~16 MB runs it.
+        // `-PdxxAbi=arm64-v8a` narrows the shipped ABIs to the ones named, for a
+        // sideload build that only ever meets one phone: the native code is
+        // ~12 MB per ABI, so a single-ABI APK is a little over half the size of
+        // the three-ABI one, which matters when the file comes down a slow link.
+        // Anything else keeps the full set above.
+        def onlyAbi = project.findProperty('dxxAbi')
         ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+            abiFilters(*(onlyAbi ? onlyAbi.split(',')*.trim() : ['arm64-v8a', 'armeabi-v7a', 'x86_64']))
         }
     }
 
