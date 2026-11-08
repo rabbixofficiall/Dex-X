@@ -59,3 +59,19 @@ session) does not have to diff 42 000 lines of Rust to find out.
 
 Each of these needs a phone in hand to tune; the list is ordered by how much of
 the "this is not quite DeX" feeling each one removes.
+
+## How to build without GitHub Actions
+
+Actions is blocked by an account billing lock, so `tools/build-windows.ps1`
+does the same build on a Windows PC: it installs Rust, Node, the MSVC C++
+build tools, JDK 17 and the Android command-line SDK (each one skipped if it is
+already there), then runs `npm ci` and `npx tauri build` — which builds the
+launcher APK, the wmd daemon and scrcpy's patched server, and bundles all three
+into the exe and the NSIS installer.
+
+```powershell
+cd C:\path\to\Dex-X
+powershell -ExecutionPolicy Bypass -File tools\build-windows.ps1
+```
+
+First run 30–60 minutes (Rust compiling ~500 crates), later runs ~2 minutes.
